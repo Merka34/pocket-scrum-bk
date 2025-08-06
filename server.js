@@ -8,7 +8,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: ["http://localhost:4200", "http://localhost:4201"],
+    origin: ["https://fanciful-pavlova-8c2b53.netlify.app", ],
     methods: ["GET", "POST"],
     credentials: true
   },
@@ -16,7 +16,7 @@ const io = socketIo(server, {
 });
 
 app.use(cors({
-  origin: ["http://localhost:4200", "http://localhost:4201"],
+  origin: ["https://fanciful-pavlova-8c2b53.netlify.app"],
   credentials: true
 }));
 app.use(express.json());
