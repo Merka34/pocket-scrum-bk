@@ -8,7 +8,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: ["https://fanciful-pavlova-8c2b53.netlify.app", ],
+    origin: ["https://poker-scrum-free.netlify.app"],
     methods: ["GET", "POST"],
     credentials: true
   },
@@ -16,7 +16,7 @@ const io = socketIo(server, {
 });
 
 app.use(cors({
-  origin: ["https://fanciful-pavlova-8c2b53.netlify.app"],
+  origin: ["https://poker-scrum-free.netlify.app"],
   credentials: true
 }));
 app.use(express.json());
@@ -26,17 +26,22 @@ const rooms = new Map();
 const userSockets = new Map(); // Maps socket.id to user data
 
 // Fibonacci sequence for SCRUM poker
-const FIBONACCI_CARDS = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89];
+const FIBONACCI_CARDS = [0, 1, 2, 3, 5, 8, 13, 21, 34, 'infinity', '?', 'coffee'];
 
 class Room {
   constructor(code, createdBy) {
     this.code = code;
     this.createdBy = createdBy;
+    this.hostId = createdBy;
     this.users = new Map();
     this.gameState = {
       phase: 'voting', // 'voting' or 'revealed'
       selections: new Map(),
       revealedAt: null
+    };
+    this.settings = {
+      onlyHostCanReveal: true,
+      allowRevealWithMissingVotes: false
     };
     this.createdAt = new Date();
   }
@@ -49,26 +54,63 @@ class Room {
     this.users.delete(userId);
     this.gameState.selections.delete(userId);
   }
-
   selectCard(userId, card) {
     if (this.gameState.phase === 'voting') {
-      this.gameState.selections.set(userId, card);
+      // Validate card value including new special cards
+      const validCards = [0, 1, 2, 3, 5, 8, 13, 21, 34, 'infinity', '?', 'coffee'];
+      if (validCards.includes(card)) {
+        this.gameState.selections.set(userId, card);
+      }
     }
+  }
+
+  canRevealCards(userId) {
+    if (this.settings.onlyHostCanReveal && userId !== this.hostId) {
+      return false;
+    }
+    
+    if (!this.settings.allowRevealWithMissingVotes) {
+      // Check if all users have selected a card
+      const totalUsers = this.users.size;
+      const totalSelections = this.gameState.selections.size;
+      return totalUsers === totalSelections;
+    }
+    
+    return true;
+  }
+
+  transferHost(newHostId) {
+    if (this.users.has(newHostId)) {
+      this.hostId = newHostId;
+      return true;
+    }
+    return false;
+  }
+
+  updateSettings(settings) {
+    this.settings = { ...this.settings, ...settings };
   }
 
   revealCards() {
     this.gameState.phase = 'revealed';
     this.gameState.revealedAt = new Date();
   }
-
   resetGame() {
     this.gameState.phase = 'voting';
     this.gameState.selections.clear();
     this.gameState.revealedAt = null;
+    
+    // Clear user selections
+    this.users.forEach(user => {
+      user.selectedCard = null;
+      user.hasSelected = false;
+    });
   }
-
   getGameState() {
-    const users = Array.from(this.users.values());
+    const users = Array.from(this.users.values()).map(user => ({
+      ...user,
+      isHost: user.id === this.hostId
+    }));
     const selections = this.gameState.phase === 'revealed' 
       ? Object.fromEntries(this.gameState.selections)
       : Object.fromEntries(
@@ -80,21 +122,28 @@ class Room {
       users,
       phase: this.gameState.phase,
       selections,
-      revealedAt: this.gameState.revealedAt
+      revealedAt: this.gameState.revealedAt,
+      hostId: this.hostId,
+      settings: this.settings
     };
   }
-
   getResults() {
     if (this.gameState.phase !== 'revealed') return null;
 
     const cardCounts = new Map();
     const userSelections = [];
+    const numericValues = [];
 
     for (const [userId, card] of this.gameState.selections) {
       const user = this.users.get(userId);
       if (user) {
         userSelections.push({ user: user.name, card });
         cardCounts.set(card, (cardCounts.get(card) || 0) + 1);
+        
+        // Only include numeric values for average calculation
+        if (typeof card === 'number' && card !== 0) {
+          numericValues.push(card);
+        }
       }
     }
 
@@ -108,10 +157,16 @@ class Room {
       }
     }
 
+    // Calculate average of numeric values only
+    const average = numericValues.length > 0 
+      ? numericValues.reduce((sum, val) => sum + val, 0) / numericValues.length 
+      : 0;
+
     return {
       userSelections: userSelections.sort((a, b) => a.user.localeCompare(b.user)),
       mostSelected,
-      totalVotes: userSelections.length
+      totalVotes: userSelections.length,
+      average: Math.round(average * 100) / 100 // Round to 2 decimal places
     };
   }
 }
@@ -210,7 +265,6 @@ io.on('connection', (socket) => {
 
     console.log(`User ${user.name} joined room ${roomCode}`);
   });
-
   // Handle card selection
   socket.on('selectCard', (data) => {
     const { roomCode, card } = data;
@@ -227,7 +281,8 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (!FIBONACCI_CARDS.includes(card)) {
+    const validCards = [0, 1, 2, 3, 5, 8, 13, 21, 34, 'infinity', '?', 'coffee'];
+    if (!validCards.includes(card)) {
       socket.emit('error', { message: 'Invalid card selected.' });
       return;
     }
@@ -242,7 +297,6 @@ io.on('connection', (socket) => {
 
     console.log(`User ${user.name} selected card ${card} in room ${roomCode}`);
   });
-
   // Handle revealing cards
   socket.on('revealCards', (data) => {
     const { roomCode } = data;
@@ -256,6 +310,12 @@ io.on('connection', (socket) => {
     const room = rooms.get(roomCode);
     if (!room) {
       socket.emit('error', { message: 'Room not found.' });
+      return;
+    }
+
+    // Check if user can reveal cards
+    if (!room.canRevealCards(user.id)) {
+      socket.emit('error', { message: 'You do not have permission to reveal cards or not all users have voted.' });
       return;
     }
 
@@ -326,9 +386,128 @@ io.on('connection', (socket) => {
     // Confirm to the leaving user
     socket.emit('leftRoom', { success: true });
 
-    // If room is empty, it will be cleaned up by the periodic cleanup
-    console.log(`User ${user.name} left room ${roomCode}`);
-  });  // Handle disconnection
+    // If room is empty, it will be cleaned up by the periodic cleanup    console.log(`User ${user.name} left room ${roomCode}`);
+  });
+
+  // Handle transferring host
+  socket.on('transferHost', (data) => {
+    const { roomCode, newHostId } = data;
+    const user = userSockets.get(socket.id);
+    
+    if (!user) {
+      socket.emit('error', { message: 'User not found. Please refresh and try again.' });
+      return;
+    }
+
+    const room = rooms.get(roomCode);
+    if (!room) {
+      socket.emit('error', { message: 'Room not found.' });
+      return;
+    }
+
+    // Only current host can transfer ownership
+    if (room.hostId !== user.id) {
+      socket.emit('error', { message: 'Only the host can transfer ownership.' });
+      return;
+    }
+
+    if (room.transferHost(newHostId)) {
+      // Notify all users about the host change
+      io.to(roomCode).emit('hostTransferred', {
+        newHostId,
+        room: room.getGameState()
+      });
+      console.log(`Host transferred to user ${newHostId} in room ${roomCode}`);
+    } else {
+      socket.emit('error', { message: 'Failed to transfer host. User not found.' });
+    }
+  });
+
+  // Handle kicking a user
+  socket.on('kickUser', (data) => {
+    const { roomCode, userId } = data;
+    const user = userSockets.get(socket.id);
+    
+    if (!user) {
+      socket.emit('error', { message: 'User not found. Please refresh and try again.' });
+      return;
+    }
+
+    const room = rooms.get(roomCode);
+    if (!room) {
+      socket.emit('error', { message: 'Room not found.' });
+      return;
+    }
+
+    // Only host can kick users
+    if (room.hostId !== user.id) {
+      socket.emit('error', { message: 'Only the host can kick users.' });
+      return;
+    }
+
+    // Can't kick yourself
+    if (userId === user.id) {
+      socket.emit('error', { message: 'You cannot kick yourself.' });
+      return;
+    }
+
+    // Find the user's socket and kick them
+    const userToKick = Array.from(userSockets.entries()).find(([socketId, userData]) => userData.id === userId);
+    if (userToKick) {
+      const [kickedSocketId] = userToKick;
+      const kickedSocket = io.sockets.sockets.get(kickedSocketId);
+      
+      if (kickedSocket) {
+        // Remove user from room
+        room.removeUser(userId);
+        kickedSocket.leave(roomCode);
+        
+        // Notify the kicked user
+        kickedSocket.emit('kicked', { roomCode });
+        
+        // Notify other users
+        socket.to(roomCode).emit('userKicked', {
+          userId,
+          room: room.getGameState()
+        });
+        
+        console.log(`User ${userId} was kicked from room ${roomCode}`);
+      }
+    }
+  });
+
+  // Handle room settings update
+  socket.on('updateRoomSettings', (data) => {
+    const { roomCode, settings } = data;
+    const user = userSockets.get(socket.id);
+    
+    if (!user) {
+      socket.emit('error', { message: 'User not found. Please refresh and try again.' });
+      return;
+    }
+
+    const room = rooms.get(roomCode);
+    if (!room) {
+      socket.emit('error', { message: 'Room not found.' });
+      return;
+    }
+
+    // Only host can update settings
+    if (room.hostId !== user.id) {
+      socket.emit('error', { message: 'Only the host can update room settings.' });
+      return;
+    }
+
+    room.updateSettings(settings);
+    
+    // Notify all users about settings change
+    io.to(roomCode).emit('roomSettingsUpdated', {
+      settings: room.settings,
+      room: room.getGameState()
+    });
+
+    console.log(`Room settings updated in ${roomCode}:`, settings);
+  });// Handle disconnection
   socket.on('disconnect', () => {
     const user = userSockets.get(socket.id);
     if (user) {
