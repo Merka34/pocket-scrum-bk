@@ -109,6 +109,7 @@ class Room {
   getGameState() {
     const users = Array.from(this.users.values()).map(user => ({
       ...user,
+      selectedCard: user.selectedCard ?? null,
       isHost: user.id === this.hostId
     }));
     const selections = this.gameState.phase === 'revealed' 
